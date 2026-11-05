@@ -59,6 +59,7 @@
   <span class="stat">灵视 <b id="insight">3</b></span>
   <span class="stat">梦蚀 <b id="erosion">0%</b></span>
   <span class="stat">累计繁荣 <b id="score">0</b></span>
+  <label class="stat">引擎 <select id="engineSel"><option value="rule">规则世界</option><option value="learned">学习到的世界模型</option></select></label>
 </header>
 <main>
   <section>
@@ -111,6 +112,7 @@
 </main>
 <div id="ending"><div class="panel" id="endBody"></div></div>
 
+<script src="learned_weights.js"></script>
 <script src="sim.js"></script>
 <script src="residents.js"></script>
 <script>
@@ -118,7 +120,8 @@
 const { OBS, OMENS } = Sim;
 const params = new URLSearchParams(location.search);
 const SEED = +params.get('seed') || (Date.now() % 100000);
-const world = Sim.createWorld(SEED);
+const ENGINE = params.get('engine') === 'learned' && Sim.hasLearned() ? 'learned' : 'rule';
+const world = Sim.createWorld(SEED, { engine: ENGINE });
 const rng = Sim.mulberry32(SEED * 7 + 1);
 const ERA_YEARS = 25, ERAS = 12;
 const st = { attn: 2, insight: 3, score: 0, sel: OMENS[0].id, running: false, era: 1,
@@ -218,6 +221,7 @@ function drawObs(o) {
   $('obs').innerHTML = OBS.map((ob) => `<div class="obs"><span>${world.anchor && world.anchor.key === ob.key ? '⚓' : ''}${ob.name}${q}</span>
     <div class="bar"><i style="width:${(o[ob.key] * 100).toFixed(0)}%;background:${ob.color}"></i></div>${spark(ob.key)}</div>`).join('') +
     `<div class="obs"><span style="color:#7ad7f0">梦蚀</span><div class="bar"><i style="width:${(world.erosion * 100).toFixed(0)}%;background:#7ad7f0"></i></div><span class="note">${world.erosion > 0.6 ? '世界在做梦' : world.erosion > 0.35 ? '边界模糊' : '清醒'}</span></div>` +
+    (ENGINE === 'learned' ? `<div class="obs"><span>分歧</span><div class="bar"><i style="width:${Math.min(100, world.disagreement / 3 * 100).toFixed(0)}%;background:#9b8cff"></i></div><span class="note">${world.disagreement > 2 ? '模型迷失了' : world.disagreement > 1 ? '模型在犹豫' : '模型有把握'}</span></div>` : '') +
     `<div class="obs"><span>学者</span><div class="bar"><i style="width:${(Sim.scholarAbility(o) * 100).toFixed(0)}%;background:#8ecae6"></i></div><span class="note">预测你的能力</span></div>` +
     `<div class="obs"><span style="color:#f2a65a">大地</span><div class="bar"><i style="width:${(world.wishDone ? 100 : world.wishYears / Sim.WISH_YEARS * 100).toFixed(0)}%;background:#f2a65a"></i></div><span class="note">${world.wishDone ? '已得偿所愿' : world.inWish ? `满足 ${world.wishYears}/${Sim.WISH_YEARS} 年` : '沉默'}</span></div>` +
     `<div class="obs"><span style="color:var(--acc)">繁荣</span><div class="bar"><i style="width:${(Sim.flourishing(o) * 200).toFixed(0)}%;background:var(--acc)"></i></div><span class="note">${Sim.flourishing(o).toFixed(2)}</span></div>`;
@@ -462,12 +466,16 @@ function end(extinct) {
     <p style="color:#f2a65a">${wishLine}</p>
     ${st.theories.length ? `<p>他们最后的理论：「${esc(st.theories[st.theories.length - 1])}」</p>` : ''}
     <p>${cults.length ? `他们记得你。在他们的经书里，你被称为 ${cults.join('、')} 的主人。` : '他们从未意识到你的存在。'}</p>
-    <p class="note">种子 ${SEED}。在网址后加 ?seed=${SEED} 可以重玩同一个世界。</p>
-    <button onclick="location.search='?seed='+${SEED}">重玩此世界</button> <button onclick="location.search=''">新的世界</button>`;
+    <p class="note">种子 ${SEED} · ${ENGINE === 'learned' ? '学习到的世界模型' : '规则世界'}。在网址后加 ?seed=${SEED}&engine=${ENGINE} 可以重玩同一个世界。</p>
+    <button onclick="location.search='?seed=${SEED}&engine=${ENGINE}'">重玩此世界</button> <button onclick="location.search='?engine=${ENGINE}'">新的世界</button>`;
   $('ending').style.display = 'flex';
 }
 
 newEraLog();
+$('engineSel').value = ENGINE;
+if (!Sim.hasLearned()) $('engineSel').querySelector('[value=learned]').disabled = true;
+$('engineSel').onchange = () => { const q = new URLSearchParams(location.search); q.set('seed', SEED); q.set('engine', $('engineSel').value); location.search = q.toString(); };
+if (ENGINE === 'learned') chron('这个世界由一个学习得到的潜空间世界模型推进：它从规则世界的三千条历史中学会了这片土地的脾气，但并不完美。', 'era');
 chron(`种子 ${SEED}。一片土地从潜流中浮现。人们还不知道你在看着。`, 'myth');
 render();
 </script>

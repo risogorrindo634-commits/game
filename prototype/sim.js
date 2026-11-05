@@ -124,7 +124,39 @@
       hints: ['武器在仓库里莫名生锈。', '争吵的人会突然忘记自己要说什么。', '风在战场上停住了。大地厌倦了喧哗。'] },
   ];
 
-  function createWorld(seed) {
+  // ---------- 引擎 ----------
+  // 'rule'：手写因果规则 + 随机线性解码器（默认，阶段 0）。
+  // 'learned'：由 model/train.py 从规则引擎的轨迹中学到的潜空间世界模型（阶段 1）：
+  //    编码器 E、解码器 G、转移模型集成 T_k(z, a)。z 的坐标完全由训练得到，没有人为语义。
+  //    征兆方向 = T(z, a) − T(z, 0)（随状态变化）；可观测空间的推动经解码器雅可比的伪逆映射回潜空间；
+  //    集成成员的分歧 = 模型"没把握"的程度，会额外推高梦蚀。
+  let LEARNED = root.UNDERCURRENT_LEARNED || null;
+  function setLearnedWeights(w) { LEARNED = w; }
+  const hasLearned = () => !!LEARNED;
+  function mlp(layers, x) {
+    let h = x;
+    layers.forEach((L, li) => {
+      const y = L.b.slice();
+      for (let i = 0; i < y.length; i++) { const row = L.W[i]; let acc = y[i]; for (let j = 0; j < h.length; j++) acc += row[j] * h[j]; y[i] = acc; }
+      h = li < layers.length - 1 ? y.map(Math.tanh) : y;
+    });
+    return h;
+  }
+  const lEncode = (l) => mlp(LEARNED.enc, l);
+  const lDecode = (z) => mlp(LEARNED.dec, z);
+  const lTrans = (k, z, a) => { const d = mlp(LEARNED.trans[k], z.concat(a)); return z.map((v, i) => v + d[i]); };
+  function actionVec(key) {
+    const a = new Array(D).fill(0);
+    const idx = (id) => OMENS.findIndex((o) => o.id === id);
+    if (isReverse(key)) a[idx(key.slice(1))] = -1;
+    else if (key.includes('+')) { const [x, y] = key.split('+'); a[idx(x)] = COMPOUND_SCALE; a[idx(y)] = COMPOUND_SCALE; }
+    else a[idx(key)] = 1;
+    return a;
+  }
+  const PANIC_OBS = OBS.map((ob) => ({ strife: 1, faith: 0.6, pop: -0.2 })[ob.key] || 0);
+
+  function createWorld(seed, { engine = 'rule' } = {}) {
+    if (engine === 'learned' && !LEARNED) throw new Error('learned weights not loaded');
     const rng = mulberry32(seed);
     // 解码器：接近单位阵但被随机旋转/混合 —— 潜空间坐标本身没有可读语义
     const Wd = [];
@@ -138,9 +170,8 @@
       const e = OBS.map((ob) => o.effect[ob.key] || 0);
       omenVecs[o.id] = matVec(Winv, e); // 潜空间中的方向
     }
-    const panicVec = matVec(Winv, OBS.map((ob) => ({ strife: 1, faith: 0.6, pop: -0.2 })[ob.key] || 0));
     const start = [0.55, 0.55, 0.3, 0.35, 0.2, 0.15];
-    const z = matVec(Winv, start.map(logit));
+    const z = engine === 'learned' ? lEncode(start.map(logit)) : matVec(Winv, start.map(logit));
     // 地形：静态的"可视化解码"种子
     const W = 48, H = 28;
     const height = [];
@@ -162,7 +193,7 @@
     }
     const wish = WISHES[Math.floor(rng() * WISHES.length)];
     return {
-      seed, Wd, Winv, panicVec, warpA, warpB, omenVecs, z,
+      seed, engine, Wd, Winv, warpA, warpB, omenVecs, z, disagreement: 0,
       wish, wishYears: 0, wishDone: false, wishJustDone: false, inWish: false,
       year: 0, map: { W, H, height },
       erosion: 0,                 // 梦蚀：离开"训练流形"的程度 ∈ [0,1]
@@ -187,10 +218,49 @@
   }
 
   function decode(world, z = world.z) {
-    const l = matVec(warpedDecoder(world), z);
+    let l;
+    if (world.engine === 'learned') {
+      l = lDecode(z);
+      const e = world.erosion;
+      if (e > 1e-3) { // 梦蚀：在 logit 空间里施加同样随年份旋转的扭曲
+        const t = world.year / 30, ca = Math.cos(t) * 0.35 * e, sb = Math.sin(t) * 0.35 * e;
+        l = l.map((v, a) => v + l.reduce((s2, lb, b) => s2 + (ca * world.warpA[a][b] + sb * world.warpB[a][b]) * lb, 0));
+      }
+    } else l = matVec(warpedDecoder(world), z);
     const o = {};
     OBS.forEach((ob, i) => (o[ob.key] = sigmoid(l[i])));
     return o;
+  }
+
+  // 在可观测 logit 空间里推动世界：规则引擎用解码器的逆；学习引擎用解码器雅可比的（最小范数）伪逆。
+  function pushObs(world, dl) {
+    if (world.engine !== 'learned') {
+      const dz = matVec(world.Winv, dl);
+      for (let i = 0; i < dz.length; i++) world.z[i] += dz[i];
+      return;
+    }
+    const z = world.z, Zd = z.length, h = 1e-3, base = lDecode(z);
+    const J = OBS.map(() => new Array(Zd).fill(0)); // D × Z
+    for (let j = 0; j < Zd; j++) {
+      const zp = z.slice(); zp[j] += h;
+      const lp = lDecode(zp);
+      for (let i = 0; i < D; i++) J[i][j] = (lp[i] - base[i]) / h;
+    }
+    const JJt = J.map((ri, i) => J.map((rk, k) => ri.reduce((s2, v, j) => s2 + v * rk[j], 0) + (i === k ? 1e-3 : 0)));
+    const y = matVec(invert(JJt), dl);
+    for (let j = 0; j < Zd; j++) { let acc = 0; for (let i = 0; i < D; i++) acc += J[i][j] * y[i]; z[j] += acc; }
+  }
+
+  // 一个征兆在潜空间中的方向
+  function omenDir(world, key) {
+    if (world.engine !== 'learned') return omenVec(world, key);
+    const a = actionVec(key), zero = new Array(D).fill(0), K = LEARNED.trans.length;
+    const out = new Array(world.z.length).fill(0);
+    for (let k = 0; k < K; k++) {
+      const p1 = lTrans(k, world.z, a), p0 = lTrans(k, world.z, zero);
+      for (let i = 0; i < out.length; i++) out[i] += (p1[i] - p0[i]) / K;
+    }
+    return out;
   }
 
   // 世界的"物理"：在可观测量上写因果规则，再拉回潜空间推进。
@@ -209,30 +279,57 @@
 
   const EROSION_DECAY = 0.985; // 每年；半衰期约 46 年 ≈ 2 个纪元
 
-  function step(world, rng, noise = 1) {
+  const DT = 0.22;
+  function advanceRule(world, rng, noise) {
     const o = decode(world);
     const g = drift(o);
-    const dt = 0.22;
     for (const k in world.wish.pull) g[k] += WISH_PULL * world.wish.pull[k] * (world.wishDone ? 0.3 : 1);
-    const gl = OBS.map((ob) => g[ob.key] * dt);
+    const gl = OBS.map((ob) => g[ob.key] * DT);
     const dz = matVec(world.Winv, gl);
     const sigma = noise * 0.09 * (1 + 2.5 * world.erosion); // 梦蚀让未来更不确定
     for (let i = 0; i < D; i++) world.z[i] += dz[i] + sigma * gauss(rng);
+  }
+  function advanceLearned(world, rng, noise) {
+    const K = LEARNED.trans.length, zero = new Array(D).fill(0), Zd = world.z.length;
+    const preds = [];
+    for (let k = 0; k < K; k++) preds.push(lTrans(k, world.z, zero));
+    const mean = new Array(Zd).fill(0);
+    for (const p of preds) for (let i = 0; i < Zd; i++) mean[i] += p[i] / K;
+    let dis = 0;
+    for (let i = 0; i < Zd; i++) {
+      const v = preds.reduce((s2, p) => s2 + (p[i] - mean[i]) ** 2, 0) / K;
+      dis += Math.sqrt(v) / LEARNED.noiseStd[i] / Zd;
+    }
+    world.disagreement = dis / LEARNED.disagreeScale; // 1 ≈ 训练数据中的第 95 百分位
+    // 模型越没把握，世界越接近"做梦"
+    world.erosion = Math.min(1, world.erosion + 0.03 * Math.max(0, world.disagreement - 1));
+    const amp = 1 + 2.5 * world.erosion;
+    const zn = mean.map((v, i) => v + noise * LEARNED.noiseStd[i] * amp * gauss(rng));
+    // 投影回编码器流形：只保留模型"认识"的变化方向，防止开环展开漂进模型从未见过的区域
+    const zp = lEncode(lDecode(zn));
+    for (let i = 0; i < Zd; i++) world.z[i] = zp[i];
+    const pull = OBS.map((ob) => (world.wish.pull[ob.key] || 0) * WISH_PULL * DT * (world.wishDone ? 0.3 : 1));
+    if (pull.some((v) => v)) pushObs(world, pull);
+  }
+
+  function step(world, rng, noise = 1) {
+    if (world.engine === 'learned') advanceLearned(world, rng, noise); else advanceRule(world, rng, noise);
     world.nightmare = null;
     // 噩梦：梦蚀超过 0.35 后，世界会随机地"梦到"某个征兆（方向随机），并伴随恐慌
     const pN = Math.max(0, world.erosion - 0.35) * 0.8;
     if (rng() < pN) {
       const om = OMENS[Math.floor(rng() * OMENS.length)];
       const sign = rng() < 0.5 ? -1 : 1, k = 1.1 * world.erosion;
-      const v = world.omenVecs[om.id];
-      for (let i = 0; i < D; i++) world.z[i] += sign * k * v[i] + 0.35 * k * world.panicVec[i];
+      const v = omenDir(world, om.id);
+      for (let i = 0; i < v.length; i++) world.z[i] += sign * k * v[i];
+      pushObs(world, PANIC_OBS.map((x) => 0.35 * k * x));
       world.nightmare = { id: om.id, sign };
     }
     if (world.anchor && world.anchor.years > 0) {
       const k = OBS.findIndex((ob) => ob.key === world.anchor.key);
-      const l = matVec(warpedDecoder(world), world.z)[k];
-      const dl = logit(world.anchor.value) - l;
-      for (let i = 0; i < D; i++) world.z[i] += world.Winv[i][k] * dl;
+      const p = Math.min(1 - 1e-6, Math.max(1e-6, decode(world)[world.anchor.key]));
+      const dl = logit(world.anchor.value) - logit(p);
+      pushObs(world, OBS.map((_, i) => (i === k ? dl : 0)));
       world.erosion = Math.min(1, world.erosion + ANCHOR_EROSION);
       if (--world.anchor.years <= 0) world.anchor = null;
     }
@@ -276,11 +373,11 @@
     const E = compound ? Math.max(world.expect[omenId] * world.expect[second], world.expect[key] || 0) : world.expect[key] || 0;
     const hedge = Math.min(0.85, E * (0.35 + 0.65 * ability));
     const eff = strength * amp * (1 - hedge);
-    const v = omenVec(world, key);
-    for (let i = 0; i < D; i++) world.z[i] += eff * v[i];
+    const v = omenDir(world, key);
+    for (let i = 0; i < v.length; i++) world.z[i] += eff * v[i];
     const surprise = 1 - E;
     const shock = 0.45 * surprise * surprise * strength * (0.3 + o.faith);
-    if (shock > 0.01) for (let i = 0; i < D; i++) world.z[i] += shock * world.panicVec[i];
+    if (shock > 0.01) pushObs(world, PANIC_OBS.map((x) => shock * x));
     const dE = 0.05 * strength * strength * amp * (compound ? COMPOUND_EROSION : isReverse(key) ? REVERSE_EROSION : 1);
     world.erosion = Math.min(1, world.erosion + dE);
     world.eraUses[key] = (world.eraUses[key] || 0) + 1;
@@ -298,7 +395,7 @@
       const k = OBS.findIndex((ob) => ob.key === n.indicator);
       if (k < 0 || (n.direction !== 'up' && n.direction !== 'down')) continue;
       const d = n.direction === 'up' ? RESIDENT_NUDGE : -RESIDENT_NUDGE;
-      for (let i = 0; i < D; i++) world.z[i] += world.Winv[i][k] * d;
+      pushObs(world, OBS.map((_, i) => (i === k ? d : 0)));
       applied.push({ indicator: n.indicator, direction: n.direction });
     }
     return applied;
@@ -324,8 +421,8 @@
       world.eraUses[key] = 0;
       const prep = world.expect[key] * ability;
       if (prep > 0.25) {
-        const k = 0.22 * prep, v = omenVec(world, key);
-        for (let i = 0; i < D; i++) world.z[i] -= k * v[i];
+        const k = 0.22 * prep, v = omenDir(world, key);
+        for (let i = 0; i < v.length; i++) world.z[i] -= k * v[i];
         preps.push({ id: key, level: prep });
       }
     }
@@ -361,7 +458,7 @@
     return runs;
   }
 
-  root.Sim = { OBS, OMENS, WISHES, WISH_YEARS, COMPOUND_NAMES, REVERSE_NAMES, REVERSE_UNLOCK, ANCHOR_YEARS, isReverse, anchor, residentNudge, compoundKey, omenName, wishHint, createWorld, cloneWorld, decode, step, intervene, anticipate, scholarAbility,
+  root.Sim = { setLearnedWeights, hasLearned, OBS, OMENS, WISHES, WISH_YEARS, COMPOUND_NAMES, REVERSE_NAMES, REVERSE_UNLOCK, ANCHOR_YEARS, isReverse, anchor, residentNudge, compoundKey, omenName, wishHint, createWorld, cloneWorld, decode, step, intervene, anticipate, scholarAbility,
     flourishing, prophecy, mulberry32, gauss };
   if (typeof module !== 'undefined') module.exports = root.Sim;
 })(typeof window !== 'undefined' ? window : globalThis);

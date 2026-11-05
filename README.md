@@ -7,6 +7,7 @@
 
 - 设计文档：[`docs/DESIGN.md`](docs/DESIGN.md)
 - 可玩原型：[`prototype/index.html`](prototype/index.html)（纯静态，无依赖，直接用浏览器打开）
+- 学习型世界模型：[`model/`](model/README.md)（从规则世界的轨迹训练，游戏中可切换为"学习到的世界模型"引擎）
 
 ## 运行原型
 
@@ -15,7 +16,7 @@ cd prototype && python3 -m http.server 8000
 # 打开 http://localhost:8000/?seed=42
 ```
 
-或直接双击 `prototype/index.html`。URL 参数 `?seed=N` 可复现同一个世界。
+或直接双击 `prototype/index.html`。URL 参数 `?seed=N` 可复现同一个世界，`?engine=learned` 使用学习到的世界模型（也可在顶栏切换）。
 
 ## 玩法速览
 
