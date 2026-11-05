@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>潜流 · Undercurrent</title>
+<style>
+  :root { --bg:#0e1116; --panel:#161b22; --line:#2a313c; --fg:#d7dde5; --dim:#8b95a3; --acc:#e9c46a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.55 -apple-system,"PingFang SC","Noto Sans SC",sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:16px; align-items:baseline; padding:12px 16px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:18px; letter-spacing:2px; }
+  header .stat { color:var(--dim); } header .stat b { color:var(--fg); font-variant-numeric:tabular-nums; }
+  main { display:grid; grid-template-columns:minmax(0,1.4fr) minmax(300px,1fr); gap:12px; padding:12px 16px; }
+  @media (max-width:860px){ main { grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; }
+  .panel h2 { margin:0 0 8px; font-size:13px; color:var(--dim); font-weight:600; letter-spacing:1px; }
+  canvas { width:100%; display:block; border-radius:6px; image-rendering:pixelated; }
+  #chron { height:260px; overflow:auto; font-size:13px; }
+  #chron p { margin:0 0 4px; } #chron .y { color:var(--dim); font-variant-numeric:tabular-nums; margin-right:6px; }
+  #chron .myth { color:var(--acc); } #chron .bad { color:#ef8a9f; } #chron .good { color:#9fd39a; }
+  .obs { display:grid; grid-template-columns:42px 1fr 96px; gap:8px; align-items:center; margin:3px 0; }
+  .bar { height:8px; background:#0b0e13; border-radius:4px; overflow:hidden; } .bar i { display:block; height:100%; }
+  .omens { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .omen { border:1px solid var(--line); border-radius:6px; padding:8px; cursor:pointer; background:#11161d; }
+  .omen.sel { border-color:var(--acc); box-shadow:0 0 0 1px var(--acc) inset; }
+  .omen b { font-size:15px; } .omen .hint { color:var(--dim); font-size:12px; }
+  .omen .codex { font-size:12px; margin-top:4px; min-height:18px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; }
+  button { background:#222a35; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:7px 12px; cursor:pointer; font:inherit; }
+  button:hover:not(:disabled) { border-color:var(--acc); } button:disabled { opacity:.4; cursor:default; }
+  button.primary { background:#3a3120; border-color:#6b5a2e; }
+  .note { color:var(--dim); font-size:12px; }
+  #ending { position:fixed; inset:0; background:rgba(5,7,10,.88); display:none; align-items:center; justify-content:center; padding:16px; }
+  #ending .panel { max-width:560px; max-height:85vh; overflow:auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>潜流 · UNDERCURRENT</h1>
+  <span class="stat">第 <b id="year">0</b> 年</span>
+  <span class="stat">纪元 <b id="era">1</b>/12</span>
+  <span class="stat">注意力 <b id="attn">2</b></span>
+  <span class="stat">灵视 <b id="insight">3</b></span>
+  <span class="stat">累计繁荣 <b id="score">0</b></span>
+</header>
+<main>
+  <section>
+    <div class="panel"><canvas id="map" width="480" height="280"></canvas></div>
+    <div class="panel" style="margin-top:12px"><h2>编年史 · 他们眼中的世界</h2><div id="chron"></div></div>
+  </section>
+  <section>
+    <div class="panel"><h2>解码视图 · 你只能看到这些</h2><div id="obs"></div></div>
+    <div class="panel" style="margin-top:12px">
+      <h2>征兆 · 潜空间中的方向（效果需亲自观察）</h2>
+      <div class="omens" id="omens"></div>
+      <div class="row">
+        <label class="note">强度 <input id="str" type="range" min="0.4" max="1.6" step="0.1" value="1"> <b id="strv">1.0</b></label>
+      </div>
+      <div class="row">
+        <button id="btnProph">预言（−1 灵视）</button>
+        <button id="btnOmen" class="primary">降下征兆（−1 注意力）</button>
+        <button id="btnRun" class="primary">让时间流淌 25 年 ▶</button>
+      </div>
+      <p class="note">每个纪元你只有 2 次干预。大部分时间，你只是看着。</p>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <h2>未来之雾 · 32 条采样未来的繁荣度（灰：不干预 / 金：降下所选征兆）</h2>
+      <canvas id="fan" width="480" height="150"></canvas>
+      <p class="note" id="fanNote">使用「预言」在行动前窥视可能的未来分布。</p>
+    </div>
+  </section>
+</main>
+<div id="ending"><div class="panel" id="endBody"></div></div>
+
+<script src="sim.js"></script>
+<script>
+'use strict';
+const { OBS, OMENS } = Sim;
+const params = new URLSearchParams(location.search);
+const SEED = +params.get('seed') || (Date.now() % 100000);
+const world = Sim.createWorld(SEED);
+const rng = Sim.mulberry32(SEED * 7 + 1);
+const ERA_YEARS = 25, ERAS = 12;
+const st = { attn: 2, insight: 3, score: 0, sel: OMENS[0].id, running: false, era: 1,
+  codex: {}, uses: {}, hist: [Sim.decode(world)], flags: {} };
+const $ = (id) => document.getElementById(id);
+
+// ---------- 编年史 ----------
+function chron(text, cls = '') {
+  const p = document.createElement('p');
+  p.innerHTML = `<span class="y">${String(world.year).padStart(3, '0')}</span><span class="${cls}">${text}</span>`;
+  $('chron').prepend(p);
+}
+const pick = (a) => a[Math.floor(rng() * a.length)];
+const EVENTS = {
+  rain:   { hi: ['大雨连月，河水漫过了堤岸。', '湖泊在低地重新出现。'], lo: ['旱季没有结束的迹象。', '井一口接一口地枯了。'] },
+  soil:   { hi: ['谷物丰收，粮仓装不下了。', '荒地重新长出了野麦。'], lo: ['土地发白，播下的种子不再发芽。', '饥荒在边远的村落蔓延。'] },
+  pop:    { hi: ['城镇的边界一年年向外推。', '新的村落沿河建起。'], lo: ['许多房屋空了。', '老人说，从前这里很热闹。'] },
+  faith:  { hi: ['高塔落成，钟声传遍山谷。', '朝圣者的队伍络绎不绝。'], lo: ['神庙年久失修，无人过问。', '年轻人不再参加祭典。'] },
+  strife: { hi: ['东西两城爆发了战争。', '街头的冲突演变成了叛乱。'], lo: ['一纸盟约结束了旧日的仇怨。', '集市上，不同口音的人一起讨价还价。'] },
+  craft:  { hi: ['第一座熔炉点燃，黑烟升起。', '水车与齿轮遍布河岸。'], lo: ['工匠的技艺失传了。', '旧时代的工具成了无人能解的遗物。'] },
+};
+const BAD = { rain: 'lo', soil: 'lo', pop: 'lo', strife: 'hi' };
+function narrate(prev, o) {
+  for (const ob of OBS) {
+    const k = ob.key, f = st.flags[k] || 'mid';
+    let nf = f;
+    if (o[k] > 0.7 && f !== 'hi') nf = 'hi';
+    else if (o[k] < 0.18 && f !== 'lo') nf = 'lo';
+    else if (o[k] > 0.3 && o[k] < 0.6) nf = 'mid';
+    if (nf !== f && nf !== 'mid') chron(pick(EVENTS[k][nf]), BAD[k] === nf ? 'bad' : (nf === 'hi' && k !== 'strife' ? 'good' : ''));
+    st.flags[k] = nf;
+  }
+}
+function myth(omen, o) {
+  const n = (st.uses[omen.id] = (st.uses[omen.id] || 0) + 1);
+  let t = `「${omen.name}」——${omen.hint}`;
+  if (o.strife > 0.55) t += ' 两派人为它的含义大打出手。';
+  else if (o.faith > 0.55) t += ' 祭司宣称这是神意，人们修建了新的祭坛。';
+  else if (o.craft > 0.5) t += ' 学者们记录了它，试图找出规律。';
+  else t += ' 人们议论了几天，便各自回去劳作。';
+  if (n === 3) t += ` 「${omen.name}」反复降临，有人开始相信：世界之外有一个"看着我们的人"。`;
+  if (n === 5) t += ` 一个崇拜「${omen.name}」的教派诞生了。他们试图预测下一次降临。`;
+  chron(t, 'myth');
+}
+
+// ---------- 渲染 ----------
+const mctx = $('map').getContext('2d');
+function hash(i, k) { let x = (i * 374761393 + k * 668265263 + SEED) | 0; x = (x ^ (x >>> 13)) * 1274126177; return ((x ^ (x >>> 16)) >>> 0) / 4294967296; }
+function drawMap(o) {
+  const { W, H, height } = world.map, cw = 480 / W, ch = 280 / H;
+  const sea = 0.15 + 0.25 * o.rain;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, h = height[i];
+    let col;
+    if (h < sea) { const d = Math.min(1, (sea - h) * 3); col = `rgb(${20 - 10 * d},${60 - 20 * d},${110 - 20 * d})`; }
+    else {
+      const g = o.soil * (1 - Math.min(1, (h - sea) * 0.8));
+      const dry = 1 - o.rain;
+      col = `rgb(${Math.round(70 + 90 * dry * (1 - g))},${Math.round(70 + 110 * g)},${Math.round(40 + 20 * g)})`;
+    }
+    mctx.fillStyle = col; mctx.fillRect(x * cw, y * ch, cw + 0.5, ch + 0.5);
+    if (h >= sea && h < sea + 0.7) {
+      const r = hash(i, 1);
+      if (r < o.pop * 0.55) {
+        mctx.fillStyle = o.craft > 0.55 && hash(i, 2) < o.craft ? '#c9cdd2' : '#f1d58a';
+        mctx.fillRect(x * cw + cw * 0.3, y * ch + ch * 0.3, cw * 0.45, ch * 0.45);
+        if (hash(i, 3) < o.faith * 0.12) { mctx.fillStyle = '#c77dff'; mctx.fillRect(x * cw + cw * 0.4, y * ch - ch * 0.2, cw * 0.25, ch * 0.7); }
+        if (Math.random() < o.strife * o.strife * 0.5) { mctx.fillStyle = 'rgba(239,71,111,.85)'; mctx.fillRect(x * cw, y * ch, cw, ch); }
+      }
+    }
+  }
+}
+function spark(key) {
+  const h = st.hist.slice(-120);
+  const pts = h.map((o, i) => `${(i / Math.max(1, h.length - 1) * 96).toFixed(1)},${(18 - o[key] * 16).toFixed(1)}`).join(' ');
+  return `<svg width="96" height="20"><polyline fill="none" stroke="${OBS.find((b) => b.key === key).color}" stroke-width="1.2" points="${pts}"/></svg>`;
+}
+function drawObs(o) {
+  $('obs').innerHTML = OBS.map((ob) => `<div class="obs"><span>${ob.name}</span>
+    <div class="bar"><i style="width:${(o[ob.key] * 100).toFixed(0)}%;background:${ob.color}"></i></div>${spark(ob.key)}</div>`).join('') +
+    `<div class="obs"><span style="color:var(--acc)">繁荣</span><div class="bar"><i style="width:${(Sim.flourishing(o) * 200).toFixed(0)}%;background:var(--acc)"></i></div><span class="note">${Sim.flourishing(o).toFixed(2)}</span></div>`;
+}
+function codexText(id) {
+  const c = st.codex[id];
+  if (!c) return '<span class="note">未曾观测</span>';
+  return OBS.map((ob) => {
+    const v = c.sum[ob.key] / c.n;
+    if (Math.abs(v) < 0.025) return '';
+    const a = v > 0 ? '↑' : '↓', big = Math.abs(v) > 0.12 ? a + a : a;
+    return `<span style="color:${ob.color}">${ob.name}${big}</span>`;
+  }).join(' ') + ` <span class="note">×${c.n}</span>`;
+}
+function drawOmens() {
+  $('omens').innerHTML = OMENS.map((o) => `<div class="omen ${o.id === st.sel ? 'sel' : ''}" data-id="${o.id}">
+    <b>${o.name}</b><div class="hint">${o.hint}</div><div class="codex">${codexText(o.id)}</div></div>`).join('');
+  document.querySelectorAll('.omen').forEach((el) => el.onclick = () => { st.sel = el.dataset.id; drawOmens(); });
+}
+function drawHeader() {
+  $('year').textContent = world.year; $('era').textContent = Math.min(st.era, ERAS);
+  $('attn').textContent = st.attn; $('insight').textContent = st.insight; $('score').textContent = st.score.toFixed(1);
+  $('btnOmen').disabled = st.running || st.attn <= 0;
+  $('btnProph').disabled = st.running || st.insight <= 0;
+  $('btnRun').disabled = st.running;
+}
+function render() { const o = Sim.decode(world); drawMap(o); drawObs(o); drawOmens(); drawHeader(); }
+
+function drawFan(base, alt) {
+  const c = $('fan'), ctx = c.getContext('2d'), Wc = c.width, Hc = c.height;
+  ctx.clearRect(0, 0, Wc, Hc);
+  ctx.strokeStyle = '#2a313c'; ctx.beginPath(); for (let i = 1; i < 4; i++) { ctx.moveTo(0, Hc * i / 4); ctx.lineTo(Wc, Hc * i / 4); } ctx.stroke();
+  const maxF = 0.6;
+  function band(runs, rgb) {
+    const T = runs[0].length, q = (arr, p) => arr[Math.floor(p * (arr.length - 1))];
+    const xs = (t) => t / (T - 1) * Wc, ys = (v) => Hc - Math.min(1, v / maxF) * Hc;
+    const qs = [];
+    for (let t = 0; t < T; t++) { const v = runs.map((r) => Sim.flourishing(r[t])).sort((a, b) => a - b); qs.push([q(v, .1), q(v, .25), q(v, .5), q(v, .75), q(v, .9)]); }
+    for (const [lo, hi, a] of [[0, 4, .15], [1, 3, .3]]) {
+      ctx.fillStyle = `rgba(${rgb},${a})`; ctx.beginPath();
+      qs.forEach((v, t) => ctx.lineTo(xs(t), ys(v[hi])));
+      for (let t = T - 1; t >= 0; t--) ctx.lineTo(xs(t), ys(qs[t][lo]));
+      ctx.fill();
+    }
+    ctx.strokeStyle = `rgb(${rgb})`; ctx.lineWidth = 1.5; ctx.beginPath(); qs.forEach((v, t) => ctx.lineTo(xs(t), ys(v[2]))); ctx.stroke();
+    return qs[T - 1][2];
+  }
+  const mb = band(base, '139,149,163'), ma = band(alt, '233,196,106');
+  const om = OMENS.find((o) => o.id === st.sel);
+  $('fanNote').textContent = `25 年后繁荣度中位数：不干预 ${mb.toFixed(2)} ／ 降下「${om.name}」${ma.toFixed(2)}。雾越宽，未来越不确定。`;
+}
+
+// ---------- 行动 ----------
+$('str').oninput = () => $('strv').textContent = (+$('str').value).toFixed(1);
+$('btnProph').onclick = () => {
+  if (st.insight <= 0) return; st.insight--;
+  const seed = Math.floor(rng() * 1e9);
+  const base = Sim.prophecy(world, { seed, samples: 32 });
+  const alt = Sim.prophecy(world, { seed, samples: 32, omen: st.sel, strength: +$('str').value });
+  drawFan(base, alt); drawHeader();
+};
+$('btnOmen').onclick = () => {
+  if (st.attn <= 0) return; st.attn--;
+  const om = OMENS.find((o) => o.id === st.sel);
+  const before = Sim.decode(world);
+  Sim.intervene(world, om.id, +$('str').value);
+  const after = Sim.decode(world);
+  const c = (st.codex[om.id] ||= { n: 0, sum: Object.fromEntries(OBS.map((b) => [b.key, 0])) });
+  c.n++; OBS.forEach((b) => c.sum[b.key] += after[b.key] - before[b.key]);
+  myth(om, after); narrate(before, after); render();
+};
+$('btnRun').onclick = () => {
+  st.running = true; drawHeader();
+  let t = 0;
+  const tick = () => {
+    const prev = Sim.decode(world);
+    Sim.step(world, rng);
+    const o = Sim.decode(world);
+    st.hist.push(o); st.score += Sim.flourishing(o);
+    narrate(prev, o);
+    drawMap(o); drawObs(o); drawHeader();
+    if (o.pop < 0.02) return end(true);
+    if (++t < ERA_YEARS) return setTimeout(tick, 70);
+    st.running = false; st.era++;
+    st.attn = 2; st.insight = Math.min(3, st.insight + 1);
+    if (st.era > ERAS) return end(false);
+    chron(`—— 第 ${st.era} 纪元开始 ——`, 'note'); render();
+  };
+  tick();
+};
+function end(extinct) {
+  st.running = false; drawHeader();
+  const avg = st.score / Math.max(1, world.year);
+  const title = extinct ? '寂静之地' : avg > 0.33 ? '黄金时代的园丁' : avg > 0.22 ? '温和的守望者' : avg > 0.14 ? '旁观者' : '迟到的神';
+  const cults = Object.entries(st.uses).filter(([, n]) => n >= 3).map(([id]) => '「' + OMENS.find((o) => o.id === id).name + '」');
+  $('endBody').innerHTML = `<h2 style="font-size:18px;color:var(--acc)">${title}</h2>
+    <p>${extinct ? `第 ${world.year} 年，最后一个人离开了这片土地。` : `${ERAS * ERA_YEARS} 年过去了。`}</p>
+    <p>平均繁荣度 <b>${avg.toFixed(3)}</b>（参考：完全不干预约 0.16；全知规划约 0.37）</p>
+    <p>${cults.length ? `他们记得你。在他们的经书里，你被称为 ${cults.join('、')} 的主人。` : '他们从未意识到你的存在。'}</p>
+    <p class="note">种子 ${SEED}。在网址后加 ?seed=${SEED} 可以重玩同一个世界。</p>
+    <button onclick="location.search='?seed='+${SEED}">重玩此世界</button> <button onclick="location.search=''">新的世界</button>`;
+  $('ending').style.display = 'flex';
+}
+
+chron(`种子 ${SEED}。一片土地从潜流中浮现。人们还不知道你在看着。`, 'myth');
+render();
+</script>
+</body>
+</html>
