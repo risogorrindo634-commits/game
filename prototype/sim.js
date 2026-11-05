@@ -83,7 +83,21 @@
     'ore+plague': '毒烟', 'hush+plague': '死寂', 'hush+ore': '沉睡的熔炉',
   };
   const compoundKey = (a, b) => [a, b].sort().join('+');
-  const omenName = (key) => COMPOUND_NAMES[key] || (OMENS.find((o) => o.id === key) || {}).name || key;
+
+  // ---------- 反向征兆 ----------
+  // 观测过 REVERSE_UNLOCK 次的征兆可以被"逆转"（−v）。键名形如 "~rain"。
+  // 逆转从未在世界里自然出现过，所以居民毫无预期，而且更快地离开流形（梦蚀 ×1.3）。
+  const REVERSE_UNLOCK = 2, REVERSE_EROSION = 1.3;
+  const REVERSE_NAMES = { rain: '旱风', comet: '星隐', dream: '无梦之夜', plague: '春潮', ore: '地息', hush: '喧嚣' };
+  const isReverse = (key) => key[0] === '~';
+  const omenName = (key) => isReverse(key) ? REVERSE_NAMES[key.slice(1)]
+    : COMPOUND_NAMES[key] || (OMENS.find((o) => o.id === key) || {}).name || key;
+
+  // ---------- 锚定 ----------
+  // 把一个可观测量钉在当前值上 ANCHOR_YEARS 年：每年把 z 沿该维度拉回。
+  // 代价：一个纪元的全部注意力，以及持续的梦蚀（世界被迫违背自己的动力学）。
+  // 梦蚀中解码器漂移，而锚定用的是原始逆映射——锚会"打滑"，并把扰动泄漏到其他维度。
+  const ANCHOR_YEARS = 25, ANCHOR_EROSION = 0.009;
 
   // ---------- 世界愿望 ----------
   // 每个世界有一个隐藏的长期倾向：它会轻微地把世界拉向某个状态（pull，logit 空间/年），
@@ -159,7 +173,7 @@
   }
 
   function cloneWorld(w) {
-    return { ...w, z: w.z.slice(), expect: { ...w.expect }, eraUses: { ...w.eraUses }, totalUses: { ...w.totalUses } };
+    return { ...w, z: w.z.slice(), anchor: w.anchor && { ...w.anchor }, expect: { ...w.expect }, eraUses: { ...w.eraUses }, totalUses: { ...w.totalUses } };
   }
 
   // ---------- 梦蚀 ----------
@@ -214,6 +228,14 @@
       for (let i = 0; i < D; i++) world.z[i] += sign * k * v[i] + 0.35 * k * world.panicVec[i];
       world.nightmare = { id: om.id, sign };
     }
+    if (world.anchor && world.anchor.years > 0) {
+      const k = OBS.findIndex((ob) => ob.key === world.anchor.key);
+      const l = matVec(warpedDecoder(world), world.z)[k];
+      const dl = logit(world.anchor.value) - l;
+      for (let i = 0; i < D; i++) world.z[i] += world.Winv[i][k] * dl;
+      world.erosion = Math.min(1, world.erosion + ANCHOR_EROSION);
+      if (--world.anchor.years <= 0) world.anchor = null;
+    }
     world.erosion *= EROSION_DECAY;
     world.year += 1;
     world.wishJustDone = false;
@@ -237,20 +259,21 @@
   //  - 对冲：居民预期到的征兆，效果被削弱（他们早已做好准备）
   //  - 震惊：完全出乎预料的征兆会引发恐慌（纷争、信仰上升）
   function omenVec(world, key) {
+    if (isReverse(key)) return world.omenVecs[key.slice(1)].map((x) => -x);
     if (!key.includes('+')) return world.omenVecs[key];
     const [a, b] = key.split('+');
     return world.omenVecs[a].map((x, i) => COMPOUND_SCALE * (x + world.omenVecs[b][i]));
   }
 
-  // second 不为空时为合成征兆。
+  // second 不为空时为合成征兆；omenId 以 "~" 开头时为反向征兆（不可合成）。
   function intervene(world, omenId, strength, second = null) {
     const o = decode(world);
     const ability = scholarAbility(o);
     const amp = 1 + 0.8 * world.erosion;
-    const compound = second && second !== omenId;
+    const compound = !!second && second !== omenId && !isReverse(omenId) && !isReverse(second);
     const key = compound ? compoundKey(omenId, second) : omenId;
     // 合成征兆的预期：要么居民已经学会了这个组合本身，要么只能从两个成分去猜
-    const E = compound ? Math.max(world.expect[omenId] * world.expect[second], world.expect[key] || 0) : world.expect[omenId];
+    const E = compound ? Math.max(world.expect[omenId] * world.expect[second], world.expect[key] || 0) : world.expect[key] || 0;
     const hedge = Math.min(0.85, E * (0.35 + 0.65 * ability));
     const eff = strength * amp * (1 - hedge);
     const v = omenVec(world, key);
@@ -258,12 +281,17 @@
     const surprise = 1 - E;
     const shock = 0.45 * surprise * surprise * strength * (0.3 + o.faith);
     if (shock > 0.01) for (let i = 0; i < D; i++) world.z[i] += shock * world.panicVec[i];
-    const dE = 0.05 * strength * strength * amp * (compound ? COMPOUND_EROSION : 1);
+    const dE = 0.05 * strength * strength * amp * (compound ? COMPOUND_EROSION : isReverse(key) ? REVERSE_EROSION : 1);
     world.erosion = Math.min(1, world.erosion + dE);
     world.eraUses[key] = (world.eraUses[key] || 0) + 1;
     if (compound) { world.eraUses[omenId] += 0.5; world.eraUses[second] += 0.5; }
     world.totalUses[key] = (world.totalUses[key] || 0) + 1;
-    return { key, compound, amp, hedge, eff, shock, erosionGain: dE, ability };
+    return { key, compound, reverse: isReverse(key), amp, hedge, eff, shock, erosionGain: dE, ability };
+  }
+
+  function anchor(world, key) {
+    world.anchor = { key, value: Math.min(0.97, Math.max(0.03, decode(world)[key])), years: ANCHOR_YEARS };
+    return world.anchor;
   }
 
   // 纪元结束：学者根据你过去的行为更新预期，并为"预期中的征兆"提前做准备。
@@ -318,7 +346,7 @@
     return runs;
   }
 
-  root.Sim = { OBS, OMENS, WISHES, WISH_YEARS, COMPOUND_NAMES, compoundKey, omenName, wishHint, createWorld, cloneWorld, decode, step, intervene, anticipate, scholarAbility,
+  root.Sim = { OBS, OMENS, WISHES, WISH_YEARS, COMPOUND_NAMES, REVERSE_NAMES, REVERSE_UNLOCK, ANCHOR_YEARS, isReverse, anchor, compoundKey, omenName, wishHint, createWorld, cloneWorld, decode, step, intervene, anticipate, scholarAbility,
     flourishing, prophecy, mulberry32, gauss };
   if (typeof module !== 'undefined') module.exports = root.Sim;
 })(typeof window !== 'undefined' ? window : globalThis);

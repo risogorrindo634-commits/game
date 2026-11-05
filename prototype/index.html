@@ -39,6 +39,7 @@
   .omen.sel2 { border-color:#7ad7f0; border-style:dashed; box-shadow:0 0 0 1px #7ad7f0 inset; }
   .omen.locked { opacity:.45; cursor:not-allowed; }
   button.on { border-color:#7ad7f0; color:#7ad7f0; }
+  select { background:#222a35; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px; font:inherit; }
   #compCodex { font-size:12px; margin-top:8px; } #compCodex div { margin:2px 0; }
   .panel.content canvas#map { box-shadow:0 0 0 2px #f2a65a; }
   body.eroded canvas#map { filter:hue-rotate(var(--hue,0deg)) saturate(1.2); }
@@ -69,6 +70,7 @@
       <div id="compCodex"></div>
       <div class="row">
         <button id="btnComb">合成模式</button>
+        <button id="btnRev">逆转</button>
         <span class="note" id="selNote"></span>
       </div>
       <div class="row">
@@ -78,6 +80,11 @@
         <button id="btnProph">预言（−1 灵视）</button>
         <button id="btnOmen" class="primary">降下征兆（−1 注意力）</button>
         <button id="btnRun" class="primary">让时间流淌 25 年 ▶</button>
+      </div>
+      <div class="row">
+        <select id="anchorKey"></select>
+        <button id="btnAnchor">锚定 25 年（−2 注意力）</button>
+        <span class="note" id="anchorNote"></span>
       </div>
       <p class="note" id="strNote"></p>
       <p class="note">每个纪元你只有 2 次干预。大部分时间，你只是看着。用力过猛会让世界"做梦"；太有规律，他们会预料到你。</p>
@@ -101,7 +108,7 @@ const world = Sim.createWorld(SEED);
 const rng = Sim.mulberry32(SEED * 7 + 1);
 const ERA_YEARS = 25, ERAS = 12;
 const st = { attn: 2, insight: 3, score: 0, sel: OMENS[0].id, running: false, era: 1,
-  codex: {}, uses: {}, hist: [Sim.decode(world)], flags: {}, dreamEras: 0, hedgeSum: 0, acts: 0, sel2: null, combine: false, wishSeen: -1 };
+  codex: {}, uses: {}, hist: [Sim.decode(world)], flags: {}, dreamEras: 0, hedgeSum: 0, acts: 0, sel2: null, combine: false, reverse: false, wishSeen: -1 };
 const $ = (id) => document.getElementById(id);
 
 // ---------- 编年史 ----------
@@ -140,7 +147,8 @@ function narrate(prev, o) {
 function myth(key, o) {
   const n = (st.uses[key] = (st.uses[key] || 0) + 1);
   const name = Sim.omenName(key), base = OMENS.find((x) => x.id === key);
-  const hint = base ? base.hint : `「${key.split('+').map(Sim.omenName).join('」与「')}」在同一刻降临，交织成从未见过的景象。`;
+  const hint = base ? base.hint : Sim.isReverse(key) ? `仿佛「${Sim.omenName(key.slice(1))}」被倒放：${OMENS.find((x) => x.id === key.slice(1)).hint}——但一切都反了过来。`
+    : `「${key.split('+').map(Sim.omenName).join('」与「')}」在同一刻降临，交织成从未见过的景象。`;
   const omen = { name };
   let t = `「${name}」——${hint}`;
   if (o.strife > 0.55) t += ' 两派人为它的含义大打出手。';
@@ -192,7 +200,7 @@ function spark(key) {
 }
 function drawObs(o) {
   const q = world.erosion > 0.5 ? '?' : '';
-  $('obs').innerHTML = OBS.map((ob) => `<div class="obs"><span>${ob.name}${q}</span>
+  $('obs').innerHTML = OBS.map((ob) => `<div class="obs"><span>${world.anchor && world.anchor.key === ob.key ? '⚓' : ''}${ob.name}${q}</span>
     <div class="bar"><i style="width:${(o[ob.key] * 100).toFixed(0)}%;background:${ob.color}"></i></div>${spark(ob.key)}</div>`).join('') +
     `<div class="obs"><span style="color:#7ad7f0">梦蚀</span><div class="bar"><i style="width:${(world.erosion * 100).toFixed(0)}%;background:#7ad7f0"></i></div><span class="note">${world.erosion > 0.6 ? '世界在做梦' : world.erosion > 0.35 ? '边界模糊' : '清醒'}</span></div>` +
     `<div class="obs"><span>学者</span><div class="bar"><i style="width:${(Sim.scholarAbility(o) * 100).toFixed(0)}%;background:#8ecae6"></i></div><span class="note">预测你的能力</span></div>` +
@@ -216,15 +224,16 @@ function expMeter(id) {
 }
 function drawStrNote() {
   const s = +$('str').value, amp = 1 + 0.8 * world.erosion;
-  const k = st.sel2 ? 2 : 1;
-  $('strNote').textContent = `梦蚀放大 ×${amp.toFixed(2)} ・ 预计梦蚀 +${Math.round(5 * s * s * amp * k)}%（强度的平方${k > 1 ? '，合成 ×2' : ''}）`;
+  const k = st.sel2 ? 2 : Sim.isReverse(selKey()) ? 1.3 : 1;
+  $('strNote').textContent = `梦蚀放大 ×${amp.toFixed(2)} ・ 预计梦蚀 +${Math.round(5 * s * s * amp * k)}%（强度的平方${st.sel2 ? '，合成 ×2' : k > 1 ? '，逆转 ×1.3' : ''}）`;
 }
 // 合成：只有观测过的征兆才能参与合成——你无法组合你不理解的东西
 const known = (id) => !!st.codex[id];
-const selKey = () => (st.sel2 ? Sim.compoundKey(st.sel, st.sel2) : st.sel);
+const canReverse = (id) => st.codex[id] && st.codex[id].n >= Sim.REVERSE_UNLOCK;
+const selKey = () => (st.sel2 ? Sim.compoundKey(st.sel, st.sel2) : st.reverse && canReverse(st.sel) ? '~' + st.sel : st.sel);
 function drawOmens() {
   $('omens').innerHTML = OMENS.map((o) => {
-    const cls = o.id === st.sel ? 'sel' : o.id === st.sel2 ? 'sel2' : st.combine && !known(o.id) ? 'locked' : '';
+    const cls = o.id === st.sel ? 'sel' : o.id === st.sel2 ? 'sel2' : (st.combine && !known(o.id)) || (st.reverse && !canReverse(o.id)) ? 'locked' : '';
     return `<div class="omen ${cls}" data-id="${o.id}">
     <b>${o.name}</b><div class="hint">${o.hint}</div><div class="codex">${codexText(o.id)}</div>${expMeter(o.id)}</div>`;
   }).join('');
@@ -237,15 +246,38 @@ function drawOmens() {
     drawOmens(); drawStrNote();
   });
   $('btnComb').classList.toggle('on', st.combine);
+  $('btnRev').classList.toggle('on', st.reverse);
+  $('btnRev').disabled = !OMENS.some((o) => canReverse(o.id));
   const nKnown = OMENS.filter((o) => known(o.id)).length;
   $('btnComb').disabled = nKnown < 2;
   $('selNote').textContent = st.sel2
     ? `「${Sim.omenName(st.sel)}」+「${Sim.omenName(st.sel2)}」→「${Sim.omenName(selKey())}」`
-    : st.combine ? (known(st.sel) ? '再选一个已观测过的征兆' : '先选一个已观测过的征兆') : nKnown < 2 ? '观测过两个征兆后可以合成' : '';
-  const comps = Object.keys(st.codex).filter((k) => k.includes('+'));
-  $('compCodex').innerHTML = comps.length ? '<span class="note">合成图鉴</span>' + comps.map((k) => `<div><b>${Sim.omenName(k)}</b>（${k.split('+').map(Sim.omenName).join('+')}） ${codexText(k)}</div>`).join('') : '';
+    : st.reverse ? (canReverse(st.sel) ? `「${Sim.omenName(st.sel)}」的反面 →「${Sim.omenName(selKey())}」` : `观测过 ${Sim.REVERSE_UNLOCK} 次的征兆才能逆转`)
+    : st.combine ? (known(st.sel) ? '再选一个已观测过的征兆' : '先选一个已观测过的征兆') : nKnown < 2 ? '观测过两个征兆后可以合成；观测过两次后可以逆转' : '';
+  const comps = Object.keys(st.codex).filter((k) => k.includes('+') || Sim.isReverse(k));
+  const origin = (k) => Sim.isReverse(k) ? `逆·${Sim.omenName(k.slice(1))}` : k.split('+').map(Sim.omenName).join('+');
+  $('compCodex').innerHTML = comps.length ? '<span class="note">衍生图鉴</span>' + comps.map((k) => `<div><b>${Sim.omenName(k)}</b>（${origin(k)}） ${codexText(k)}</div>`).join('') : '';
 }
-$('btnComb').onclick = () => { st.combine = !st.combine; if (!st.combine) st.sel2 = null; drawOmens(); drawStrNote(); };
+$('anchorKey').innerHTML = OBS.map((b) => `<option value="${b.key}">${b.name}</option>`).join('');
+$('btnAnchor').onclick = () => {
+  if (st.attn < 2 || world.anchor) return;
+  st.attn = 0;
+  const a = Sim.anchor(world, $('anchorKey').value);
+  chron(`你按住了世界的一角。「${OBS.find((b) => b.key === a.key).name}」将在 ${Sim.ANCHOR_YEARS} 年里保持不变。`, 'myth');
+  render();
+};
+$('btnComb').onclick = () => { st.combine = !st.combine; st.reverse = false; if (!st.combine) st.sel2 = null; drawOmens(); drawStrNote(); };
+$('btnRev').onclick = () => { st.reverse = !st.reverse; st.combine = false; st.sel2 = null; drawOmens(); drawStrNote(); };
+const ANCHOR_TEXT = {
+  rain: ['雨量一天不多，一天不少。', '天空像被钉住了。'], soil: ['土地的肥力纹丝不动。', '收成年年一样，像是抄写出来的。'],
+  pop: ['出生与死亡总是恰好相抵。', '人口簿上的数字一年都没有变。'], faith: ['信者的人数不增不减。', '祭典上的人，年年都是那么多。'],
+  strife: ['争端既不平息，也不扩大。', '战线二十五年没有移动一步。'], craft: ['工匠们发现，新的发明总会失败，旧的手艺也不会失传。', '时间在作坊里停住了。'],
+};
+function drawAnchor() {
+  const a = world.anchor;
+  $('btnAnchor').disabled = st.running || st.attn < 2 || !!a;
+  $('anchorNote').textContent = a ? `⚓ ${OBS.find((b) => b.key === a.key).name} 被钉在 ${a.value.toFixed(2)}，还剩 ${a.years} 年` : '把一个指标钉在当前值上；每年梦蚀 +0.9%';
+}
 function drawHeader() {
   $('year').textContent = world.year; $('era').textContent = Math.min(st.era, ERAS);
   $('attn').textContent = st.attn; $('erosion').textContent = Math.round(world.erosion * 100) + '%'; $('erosion').style.color = world.erosion > 0.6 ? '#7ad7f0' : ''; $('insight').textContent = st.insight; $('score').textContent = st.score.toFixed(1);
@@ -253,7 +285,7 @@ function drawHeader() {
   $('btnProph').disabled = st.running || st.insight <= 0;
   $('btnRun').disabled = st.running;
 }
-function render() { const o = Sim.decode(world); drawMap(o); drawObs(o); drawOmens(); drawHeader(); drawStrNote(); }
+function render() { const o = Sim.decode(world); drawMap(o); drawObs(o); drawOmens(); drawHeader(); drawStrNote(); drawAnchor(); }
 
 function drawFan(base, alt) {
   const c = $('fan'), ctx = c.getContext('2d'), Wc = c.width, Hc = c.height;
@@ -284,13 +316,13 @@ $('btnProph').onclick = () => {
   if (st.insight <= 0) return; st.insight--;
   const seed = Math.floor(rng() * 1e9);
   const base = Sim.prophecy(world, { seed, samples: 32 });
-  const alt = Sim.prophecy(world, { seed, samples: 32, omen: st.sel, second: st.sel2, strength: +$('str').value });
+  const alt = Sim.prophecy(world, { seed, samples: 32, omen: selKey().split('+')[0], second: st.sel2 ? st.sel2 : null, strength: +$('str').value });
   drawFan(base, alt); drawHeader();
 };
 $('btnOmen').onclick = () => {
   if (st.attn <= 0) return; st.attn--;
   const before = Sim.decode(world);
-  const r = Sim.intervene(world, st.sel, +$('str').value, st.sel2);
+  const r = Sim.intervene(world, st.sel2 ? st.sel : selKey(), +$('str').value, st.sel2);
   const om = { name: Sim.omenName(r.key) };
   st.hedgeSum += r.hedge; st.acts++;
   const after = Sim.decode(world);
@@ -299,7 +331,7 @@ $('btnOmen').onclick = () => {
   myth(r.key, after);
   if (r.hedge > 0.2) chron(`学者们早已预言了「${om.name}」。人们有所准备，它的影响被削弱了约 ${Math.round(r.hedge * 100)}%。`, 'good');
   else if (r.shock > 0.15) chron(`没有人预料到「${om.name}」。恐慌在街巷间蔓延，有人说世界末日到了。`, 'bad');
-  if (r.compound && r.shock <= 0.15 && r.hedge <= 0.2) chron(`从未有人见过「${om.name}」。学者们无从预料。`, '');
+  if ((r.compound || r.reverse) && r.shock <= 0.15 && r.hedge <= 0.2) chron(`从未有人见过「${om.name}」。学者们无从预料。`, '');
   if (r.amp > 1.3) chron(`在梦蚀之中，「${om.name}」显得格外剧烈，像是被放大了 ${r.amp.toFixed(1)} 倍。`, 'dream');
   narrate(before, after); render();
 };
@@ -316,12 +348,15 @@ $('btnRun').onclick = () => {
       const nm = OMENS.find((x) => x.id === world.nightmare.id);
       chron(world.nightmare.sign > 0 ? `噩梦：没有人降下它，「${nm.name}」却自己出现了。` : `噩梦：世界梦到了「${nm.name}」的反面。${pick(DREAMS)}`, 'dream');
     } else if (world.erosion > 0.45 && rng() < (world.erosion - 0.45) * 0.4) chron(pick(DREAMS), 'dream');
+    if (world.anchor && world.anchor.years === Sim.ANCHOR_YEARS - 8) chron(pick(ANCHOR_TEXT[world.anchor.key]), 'myth');
     if (world.wishJustDone) {
       chron(`大地发出一声悠长的叹息。${world.wish.reveal}它得到了。梦蚀消散，世界前所未有地清醒。`, 'wish');
     } else if (world.inWish && st.wishSeen !== st.era && !world.wishDone) {
       st.wishSeen = st.era; chron('不知为何，大地似乎很满足。', 'wish');
     }
-    drawMap(o); drawObs(o); drawHeader();
+    if (st.anchorWas && !world.anchor) chron('锚松开了。世界重新开始流动。', 'era');
+    st.anchorWas = !!world.anchor;
+    drawMap(o); drawObs(o); drawHeader(); drawAnchor();
     if (o.pop < 0.02) return end(true);
     if (++t < ERA_YEARS) return setTimeout(tick, 70);
     st.running = false; st.era++;
