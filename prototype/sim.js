@@ -71,6 +71,45 @@
       effect: { strife: -1.2, faith: -0.6, pop: 0.3, craft: -0.4 } },
   ];
 
+  // ---------- 征兆合成 ----------
+  // 两个已观测过的征兆可以合成一次干预：各以 0.6 倍同时推动。
+  // 居民从未见过这种组合（预期 = 两者预期之积），所以很难被对冲，但容易引发恐慌；
+  // 而"不自然的组合"让世界更快地离开流形（梦蚀 ×2）。
+  const COMPOUND_SCALE = 0.6, COMPOUND_EROSION = 2;
+  const COMPOUND_NAMES = {
+    'comet+rain': '星雨', 'dream+rain': '雨梦', 'plague+rain': '瘴雨', 'ore+rain': '锈雨', 'hush+rain': '静雨',
+    'comet+dream': '星谕', 'comet+plague': '赤雾', 'comet+ore': '陨铁', 'comet+hush': '无声之星',
+    'dream+plague': '迷梦', 'dream+ore': '机巧之梦', 'dream+hush': '长眠',
+    'ore+plague': '毒烟', 'hush+plague': '死寂', 'hush+ore': '沉睡的熔炉',
+  };
+  const compoundKey = (a, b) => [a, b].sort().join('+');
+  const omenName = (key) => COMPOUND_NAMES[key] || (OMENS.find((o) => o.id === key) || {}).name || key;
+
+  // ---------- 世界愿望 ----------
+  // 每个世界有一个隐藏的长期倾向：它会轻微地把世界拉向某个状态（pull，logit 空间/年），
+  // 编年史会以越来越明确的方式暗示它。在愿望状态中连续保持 WISH_YEARS 年即视为实现。
+  const WISH_YEARS = 30, WISH_PULL = 0.2;
+  const WISHES = [
+    { id: 'sea', name: '海', reveal: '这片土地想要海。',
+      cond: (o) => o.rain > 0.75 && o.pop > 0.2, pull: { rain: 0.6 },
+      hints: ['渔夫说，夜里能听见远方的潮声。', '孩子们在干涸的河床上画波浪。', '所有的井水都带着一丝咸味。人们梦见无边的水。'] },
+    { id: 'fire', name: '火', reveal: '这片土地想要火与锻造。',
+      cond: (o) => o.craft > 0.75 && o.strife < 0.35 && o.soil > 0.25, pull: { craft: 0.5 },
+      hints: ['矿脉在地表露出，像是有意被人发现。', '雷击总是落在铁匠铺附近。', '石头里传来锤击声。大地在等待熔炉。'] },
+    { id: 'god', name: '神', reveal: '这片土地想要被崇拜。',
+      cond: (o) => o.faith > 0.72 && o.strife < 0.35 && o.pop > 0.25, pull: { faith: 0.5 },
+      hints: ['山顶的石头被风雕成了人形。', '新生儿的第一个词总是同一个音节。', '大地本身在祈祷。它想听到回应。'] },
+    { id: 'throng', name: '繁衍', reveal: '这片土地想要人群。',
+      cond: (o) => o.pop > 0.68 && o.soil > 0.3, pull: { pop: 0.45, soil: 0.2 },
+      hints: ['野花开在每一条小路旁边。', '荒地上自己长出了可以吃的根茎。', '土地向人张开怀抱。它想被填满。'] },
+    { id: 'wild', name: '荒野', reveal: '这片土地想回到荒野。',
+      cond: (o) => o.pop < 0.35 && o.soil > 0.5, pull: { soil: 0.8, pop: -0.4 },
+      hints: ['田地的边缘，森林每年都向前推进一步。', '狼群在城墙外徘徊，却从不进攻。', '藤蔓爬满了空房子。大地想要安静地生长。'] },
+    { id: 'peace', name: '寂静', reveal: '这片土地想要和平与沉默。',
+      cond: (o) => o.strife < 0.06 && o.faith < 0.2 && o.pop > 0.45, pull: { strife: -0.5, faith: -0.3 },
+      hints: ['武器在仓库里莫名生锈。', '争吵的人会突然忘记自己要说什么。', '风在战场上停住了。大地厌倦了喧哗。'] },
+  ];
+
   function createWorld(seed) {
     const rng = mulberry32(seed);
     // 解码器：接近单位阵但被随机旋转/混合 —— 潜空间坐标本身没有可读语义
@@ -107,8 +146,10 @@
       warpA.push([]); warpB.push([]);
       for (let b = 0; b < D; b++) { warpA[a].push(gauss(rng)); warpB[a].push(gauss(rng)); }
     }
+    const wish = WISHES[Math.floor(rng() * WISHES.length)];
     return {
       seed, Wd, Winv, panicVec, warpA, warpB, omenVecs, z,
+      wish, wishYears: 0, wishDone: false, wishJustDone: false, inWish: false,
       year: 0, map: { W, H, height },
       erosion: 0,                 // 梦蚀：离开"训练流形"的程度 ∈ [0,1]
         expect: Object.fromEntries(OMENS.map((o) => [o.id, 0])), // 居民对每个征兆的预期 ∈ [0,1]
@@ -158,6 +199,7 @@
     const o = decode(world);
     const g = drift(o);
     const dt = 0.22;
+    for (const k in world.wish.pull) g[k] += WISH_PULL * world.wish.pull[k] * (world.wishDone ? 0.3 : 1);
     const gl = OBS.map((ob) => g[ob.key] * dt);
     const dz = matVec(world.Winv, gl);
     const sigma = noise * 0.09 * (1 + 2.5 * world.erosion); // 梦蚀让未来更不确定
@@ -174,6 +216,14 @@
     }
     world.erosion *= EROSION_DECAY;
     world.year += 1;
+    world.wishJustDone = false;
+    world.inWish = world.wish.cond(decode(world));
+    world.wishYears = world.inWish ? world.wishYears + 1 : 0; // 连续年数
+    world.wishBest = Math.max(world.wishBest || 0, world.wishYears);
+    if (world.inWish && !world.wishDone && world.wishYears >= WISH_YEARS) {
+      world.wishDone = world.wishJustDone = true;
+      world.erosion = 0; // 愿望实现：世界回到清醒，此后愿望的拉力减弱
+    }
   }
 
   // ---------- 居民对你的预测 ----------
@@ -186,21 +236,34 @@
   //  - 梦蚀放大：已经离开流形的世界更"软"，同样的推动效果更大，但也更不可预测
   //  - 对冲：居民预期到的征兆，效果被削弱（他们早已做好准备）
   //  - 震惊：完全出乎预料的征兆会引发恐慌（纷争、信仰上升）
-  function intervene(world, omenId, strength) {
+  function omenVec(world, key) {
+    if (!key.includes('+')) return world.omenVecs[key];
+    const [a, b] = key.split('+');
+    return world.omenVecs[a].map((x, i) => COMPOUND_SCALE * (x + world.omenVecs[b][i]));
+  }
+
+  // second 不为空时为合成征兆。
+  function intervene(world, omenId, strength, second = null) {
     const o = decode(world);
     const ability = scholarAbility(o);
     const amp = 1 + 0.8 * world.erosion;
-    const hedge = Math.min(0.85, world.expect[omenId] * (0.35 + 0.65 * ability));
+    const compound = second && second !== omenId;
+    const key = compound ? compoundKey(omenId, second) : omenId;
+    // 合成征兆的预期：要么居民已经学会了这个组合本身，要么只能从两个成分去猜
+    const E = compound ? Math.max(world.expect[omenId] * world.expect[second], world.expect[key] || 0) : world.expect[omenId];
+    const hedge = Math.min(0.85, E * (0.35 + 0.65 * ability));
     const eff = strength * amp * (1 - hedge);
-    const v = world.omenVecs[omenId];
+    const v = omenVec(world, key);
     for (let i = 0; i < D; i++) world.z[i] += eff * v[i];
-    const surprise = 1 - world.expect[omenId];
+    const surprise = 1 - E;
     const shock = 0.45 * surprise * surprise * strength * (0.3 + o.faith);
     if (shock > 0.01) for (let i = 0; i < D; i++) world.z[i] += shock * world.panicVec[i];
-    const dE = 0.05 * strength * strength * amp;
+    const dE = 0.05 * strength * strength * amp * (compound ? COMPOUND_EROSION : 1);
     world.erosion = Math.min(1, world.erosion + dE);
-    world.eraUses[omenId]++; world.totalUses[omenId]++;
-    return { amp, hedge, eff, shock, erosionGain: dE, ability };
+    world.eraUses[key] = (world.eraUses[key] || 0) + 1;
+    if (compound) { world.eraUses[omenId] += 0.5; world.eraUses[second] += 0.5; }
+    world.totalUses[key] = (world.totalUses[key] || 0) + 1;
+    return { key, compound, amp, hedge, eff, shock, erosionGain: dE, ability };
   }
 
   // 纪元结束：学者根据你过去的行为更新预期，并为"预期中的征兆"提前做准备。
@@ -209,19 +272,28 @@
     const o = decode(world);
     const ability = scholarAbility(o);
     const preps = [];
-    for (const om of OMENS) {
-      const used = Math.min(1, world.eraUses[om.id] / 2);
-      const cult = world.totalUses[om.id] >= 5 ? 0.15 : 0; // 崇拜它的教派会额外努力预测
-      world.expect[om.id] = Math.min(1, 0.55 * world.expect[om.id] + (0.5 + cult) * used * (0.4 + 0.6 * ability));
-      world.eraUses[om.id] = 0;
-      const prep = world.expect[om.id] * ability;
+    // 基础征兆与用过的合成征兆一视同仁：用得越规律，越会被学会
+    const keys = new Set([...OMENS.map((om) => om.id), ...Object.keys(world.eraUses), ...Object.keys(world.expect)]);
+    for (const key of keys) {
+      const used = Math.min(1, (world.eraUses[key] || 0) / 2);
+      const cult = (world.totalUses[key] || 0) >= 5 ? 0.15 : 0; // 崇拜它的教派会额外努力预测
+      world.expect[key] = Math.min(1, 0.55 * (world.expect[key] || 0) + (0.5 + cult) * used * (0.4 + 0.6 * ability));
+      world.eraUses[key] = 0;
+      const prep = world.expect[key] * ability;
       if (prep > 0.25) {
-        const k = 0.22 * prep, v = world.omenVecs[om.id];
+        const k = 0.22 * prep, v = omenVec(world, key);
         for (let i = 0; i < D; i++) world.z[i] -= k * v[i];
-        preps.push({ id: om.id, level: prep });
+        preps.push({ id: key, level: prep });
       }
     }
     return { ability, preps };
+  }
+
+  // 愿望的暗示：越往后越明确（第 3 条几乎直说）
+  function wishHint(world, era, rng) {
+    const h = world.wish.hints;
+    const tier = era < 4 ? 0 : era < 8 ? 1 : 2;
+    return h[Math.max(0, tier - (rng() < 0.3 ? 1 : 0))];
   }
 
   // 繁荣度：既要人口，也要和平，也不能把一切押在单一维度上
@@ -233,12 +305,12 @@
   }
 
   // 预言：从当前（或假设的）状态出发采样 N 条未来，返回分位数扇形
-  function prophecy(world, { years = 25, samples = 32, omen = null, strength = 1, seed = 1 } = {}) {
+  function prophecy(world, { years = 25, samples = 32, omen = null, second = null, strength = 1, seed = 1 } = {}) {
     const rng = mulberry32(seed);
     const runs = [];
     for (let k = 0; k < samples; k++) {
       const w = cloneWorld(world);
-      if (omen) intervene(w, omen, strength);
+      if (omen) intervene(w, omen, strength, second);
       const traj = [decode(w)];
       for (let t = 0; t < years; t++) { step(w, rng); traj.push(decode(w)); }
       runs.push(traj);
@@ -246,7 +318,7 @@
     return runs;
   }
 
-  root.Sim = { OBS, OMENS, createWorld, cloneWorld, decode, step, intervene, anticipate, scholarAbility,
+  root.Sim = { OBS, OMENS, WISHES, WISH_YEARS, COMPOUND_NAMES, compoundKey, omenName, wishHint, createWorld, cloneWorld, decode, step, intervene, anticipate, scholarAbility,
     flourishing, prophecy, mulberry32, gauss };
   if (typeof module !== 'undefined') module.exports = root.Sim;
 })(typeof window !== 'undefined' ? window : globalThis);

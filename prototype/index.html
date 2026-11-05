@@ -35,6 +35,12 @@
   .exp i { width:10px; height:4px; border-radius:2px; background:#2a313c; } .exp i.on { background:#e9c46a; }
   #chron .dream { color:#7ad7f0; font-style:italic; }
   #chron .era { color:var(--dim); }
+  #chron .wish { color:#f2a65a; }
+  .omen.sel2 { border-color:#7ad7f0; border-style:dashed; box-shadow:0 0 0 1px #7ad7f0 inset; }
+  .omen.locked { opacity:.45; cursor:not-allowed; }
+  button.on { border-color:#7ad7f0; color:#7ad7f0; }
+  #compCodex { font-size:12px; margin-top:8px; } #compCodex div { margin:2px 0; }
+  .panel.content canvas#map { box-shadow:0 0 0 2px #f2a65a; }
   body.eroded canvas#map { filter:hue-rotate(var(--hue,0deg)) saturate(1.2); }
   #ending { position:fixed; inset:0; background:rgba(5,7,10,.88); display:none; align-items:center; justify-content:center; padding:16px; }
   #ending .panel { max-width:560px; max-height:85vh; overflow:auto; }
@@ -52,7 +58,7 @@
 </header>
 <main>
   <section>
-    <div class="panel"><canvas id="map" width="480" height="280"></canvas></div>
+    <div class="panel" id="mapPanel"><canvas id="map" width="480" height="280"></canvas></div>
     <div class="panel" style="margin-top:12px"><h2>编年史 · 他们眼中的世界</h2><div id="chron"></div></div>
   </section>
   <section>
@@ -60,6 +66,11 @@
     <div class="panel" style="margin-top:12px">
       <h2>征兆 · 潜空间中的方向（效果需亲自观察）</h2>
       <div class="omens" id="omens"></div>
+      <div id="compCodex"></div>
+      <div class="row">
+        <button id="btnComb">合成模式</button>
+        <span class="note" id="selNote"></span>
+      </div>
       <div class="row">
         <label class="note">强度 <input id="str" type="range" min="0.4" max="1.6" step="0.1" value="1"> <b id="strv">1.0</b></label>
       </div>
@@ -90,7 +101,7 @@ const world = Sim.createWorld(SEED);
 const rng = Sim.mulberry32(SEED * 7 + 1);
 const ERA_YEARS = 25, ERAS = 12;
 const st = { attn: 2, insight: 3, score: 0, sel: OMENS[0].id, running: false, era: 1,
-  codex: {}, uses: {}, hist: [Sim.decode(world)], flags: {}, dreamEras: 0, hedgeSum: 0, acts: 0 };
+  codex: {}, uses: {}, hist: [Sim.decode(world)], flags: {}, dreamEras: 0, hedgeSum: 0, acts: 0, sel2: null, combine: false, wishSeen: -1 };
 const $ = (id) => document.getElementById(id);
 
 // ---------- 编年史 ----------
@@ -126,9 +137,12 @@ function narrate(prev, o) {
     st.flags[k] = nf;
   }
 }
-function myth(omen, o) {
-  const n = (st.uses[omen.id] = (st.uses[omen.id] || 0) + 1);
-  let t = `「${omen.name}」——${omen.hint}`;
+function myth(key, o) {
+  const n = (st.uses[key] = (st.uses[key] || 0) + 1);
+  const name = Sim.omenName(key), base = OMENS.find((x) => x.id === key);
+  const hint = base ? base.hint : `「${key.split('+').map(Sim.omenName).join('」与「')}」在同一刻降临，交织成从未见过的景象。`;
+  const omen = { name };
+  let t = `「${name}」——${hint}`;
   if (o.strife > 0.55) t += ' 两派人为它的含义大打出手。';
   else if (o.faith > 0.55) t += ' 祭司宣称这是神意，人们修建了新的祭坛。';
   else if (o.craft > 0.5) t += ' 学者们记录了它，试图找出规律。';
@@ -145,6 +159,7 @@ function drawMap(o) {
   const { W, H, height } = world.map, cw = 480 / W, ch = 280 / H;
   const e = world.erosion;
   document.body.classList.toggle('eroded', e > 0.35);
+  $('mapPanel').classList.toggle('content', world.inWish);
   document.body.style.setProperty('--hue', `${Math.round(Math.sin(world.year / 7) * 70 * Math.max(0, e - 0.35))}deg`);
   const sea = 0.15 + 0.25 * o.rain;
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
@@ -181,6 +196,7 @@ function drawObs(o) {
     <div class="bar"><i style="width:${(o[ob.key] * 100).toFixed(0)}%;background:${ob.color}"></i></div>${spark(ob.key)}</div>`).join('') +
     `<div class="obs"><span style="color:#7ad7f0">梦蚀</span><div class="bar"><i style="width:${(world.erosion * 100).toFixed(0)}%;background:#7ad7f0"></i></div><span class="note">${world.erosion > 0.6 ? '世界在做梦' : world.erosion > 0.35 ? '边界模糊' : '清醒'}</span></div>` +
     `<div class="obs"><span>学者</span><div class="bar"><i style="width:${(Sim.scholarAbility(o) * 100).toFixed(0)}%;background:#8ecae6"></i></div><span class="note">预测你的能力</span></div>` +
+    `<div class="obs"><span style="color:#f2a65a">大地</span><div class="bar"><i style="width:${(world.wishDone ? 100 : world.wishYears / Sim.WISH_YEARS * 100).toFixed(0)}%;background:#f2a65a"></i></div><span class="note">${world.wishDone ? '已得偿所愿' : world.inWish ? `满足 ${world.wishYears}/${Sim.WISH_YEARS} 年` : '沉默'}</span></div>` +
     `<div class="obs"><span style="color:var(--acc)">繁荣</span><div class="bar"><i style="width:${(Sim.flourishing(o) * 200).toFixed(0)}%;background:var(--acc)"></i></div><span class="note">${Sim.flourishing(o).toFixed(2)}</span></div>`;
 }
 function codexText(id) {
@@ -200,13 +216,36 @@ function expMeter(id) {
 }
 function drawStrNote() {
   const s = +$('str').value, amp = 1 + 0.8 * world.erosion;
-  $('strNote').textContent = `梦蚀放大 ×${amp.toFixed(2)} ・ 预计梦蚀 +${Math.round(5 * s * s * amp)}%（强度的平方）`;
+  const k = st.sel2 ? 2 : 1;
+  $('strNote').textContent = `梦蚀放大 ×${amp.toFixed(2)} ・ 预计梦蚀 +${Math.round(5 * s * s * amp * k)}%（强度的平方${k > 1 ? '，合成 ×2' : ''}）`;
 }
+// 合成：只有观测过的征兆才能参与合成——你无法组合你不理解的东西
+const known = (id) => !!st.codex[id];
+const selKey = () => (st.sel2 ? Sim.compoundKey(st.sel, st.sel2) : st.sel);
 function drawOmens() {
-  $('omens').innerHTML = OMENS.map((o) => `<div class="omen ${o.id === st.sel ? 'sel' : ''}" data-id="${o.id}">
-    <b>${o.name}</b><div class="hint">${o.hint}</div><div class="codex">${codexText(o.id)}</div>${expMeter(o.id)}</div>`).join('');
-  document.querySelectorAll('.omen').forEach((el) => el.onclick = () => { st.sel = el.dataset.id; drawOmens(); });
+  $('omens').innerHTML = OMENS.map((o) => {
+    const cls = o.id === st.sel ? 'sel' : o.id === st.sel2 ? 'sel2' : st.combine && !known(o.id) ? 'locked' : '';
+    return `<div class="omen ${cls}" data-id="${o.id}">
+    <b>${o.name}</b><div class="hint">${o.hint}</div><div class="codex">${codexText(o.id)}</div>${expMeter(o.id)}</div>`;
+  }).join('');
+  document.querySelectorAll('.omen').forEach((el) => el.onclick = () => {
+    const id = el.dataset.id;
+    if (!st.combine) { st.sel = id; st.sel2 = null; }
+    else if (id === st.sel) return; // 主征兆不变；点副征兆可取消
+    else if (id === st.sel2) st.sel2 = null;
+    else if (known(id) && known(st.sel)) st.sel2 = id;
+    drawOmens(); drawStrNote();
+  });
+  $('btnComb').classList.toggle('on', st.combine);
+  const nKnown = OMENS.filter((o) => known(o.id)).length;
+  $('btnComb').disabled = nKnown < 2;
+  $('selNote').textContent = st.sel2
+    ? `「${Sim.omenName(st.sel)}」+「${Sim.omenName(st.sel2)}」→「${Sim.omenName(selKey())}」`
+    : st.combine ? (known(st.sel) ? '再选一个已观测过的征兆' : '先选一个已观测过的征兆') : nKnown < 2 ? '观测过两个征兆后可以合成' : '';
+  const comps = Object.keys(st.codex).filter((k) => k.includes('+'));
+  $('compCodex').innerHTML = comps.length ? '<span class="note">合成图鉴</span>' + comps.map((k) => `<div><b>${Sim.omenName(k)}</b>（${k.split('+').map(Sim.omenName).join('+')}） ${codexText(k)}</div>`).join('') : '';
 }
+$('btnComb').onclick = () => { st.combine = !st.combine; if (!st.combine) st.sel2 = null; drawOmens(); drawStrNote(); };
 function drawHeader() {
   $('year').textContent = world.year; $('era').textContent = Math.min(st.era, ERAS);
   $('attn').textContent = st.attn; $('erosion').textContent = Math.round(world.erosion * 100) + '%'; $('erosion').style.color = world.erosion > 0.6 ? '#7ad7f0' : ''; $('insight').textContent = st.insight; $('score').textContent = st.score.toFixed(1);
@@ -236,8 +275,7 @@ function drawFan(base, alt) {
     return qs[T - 1][2];
   }
   const mb = band(base, '139,149,163'), ma = band(alt, '233,196,106');
-  const om = OMENS.find((o) => o.id === st.sel);
-  $('fanNote').textContent = `25 年后繁荣度中位数：不干预 ${mb.toFixed(2)} ／ 降下「${om.name}」${ma.toFixed(2)}。雾越宽，未来越不确定。`;
+  $('fanNote').textContent = `25 年后繁荣度中位数：不干预 ${mb.toFixed(2)} ／ 降下「${Sim.omenName(selKey())}」${ma.toFixed(2)}。雾越宽，未来越不确定。`;
 }
 
 // ---------- 行动 ----------
@@ -246,21 +284,22 @@ $('btnProph').onclick = () => {
   if (st.insight <= 0) return; st.insight--;
   const seed = Math.floor(rng() * 1e9);
   const base = Sim.prophecy(world, { seed, samples: 32 });
-  const alt = Sim.prophecy(world, { seed, samples: 32, omen: st.sel, strength: +$('str').value });
+  const alt = Sim.prophecy(world, { seed, samples: 32, omen: st.sel, second: st.sel2, strength: +$('str').value });
   drawFan(base, alt); drawHeader();
 };
 $('btnOmen').onclick = () => {
   if (st.attn <= 0) return; st.attn--;
-  const om = OMENS.find((o) => o.id === st.sel);
   const before = Sim.decode(world);
-  const r = Sim.intervene(world, om.id, +$('str').value);
+  const r = Sim.intervene(world, st.sel, +$('str').value, st.sel2);
+  const om = { name: Sim.omenName(r.key) };
   st.hedgeSum += r.hedge; st.acts++;
   const after = Sim.decode(world);
-  const c = (st.codex[om.id] ||= { n: 0, sum: Object.fromEntries(OBS.map((b) => [b.key, 0])) });
+  const c = (st.codex[r.key] ||= { n: 0, sum: Object.fromEntries(OBS.map((b) => [b.key, 0])) });
   c.n++; OBS.forEach((b) => c.sum[b.key] += after[b.key] - before[b.key]);
-  myth(om, after);
+  myth(r.key, after);
   if (r.hedge > 0.2) chron(`学者们早已预言了「${om.name}」。人们有所准备，它的影响被削弱了约 ${Math.round(r.hedge * 100)}%。`, 'good');
   else if (r.shock > 0.15) chron(`没有人预料到「${om.name}」。恐慌在街巷间蔓延，有人说世界末日到了。`, 'bad');
+  if (r.compound && r.shock <= 0.15 && r.hedge <= 0.2) chron(`从未有人见过「${om.name}」。学者们无从预料。`, '');
   if (r.amp > 1.3) chron(`在梦蚀之中，「${om.name}」显得格外剧烈，像是被放大了 ${r.amp.toFixed(1)} 倍。`, 'dream');
   narrate(before, after); render();
 };
@@ -277,6 +316,11 @@ $('btnRun').onclick = () => {
       const nm = OMENS.find((x) => x.id === world.nightmare.id);
       chron(world.nightmare.sign > 0 ? `噩梦：没有人降下它，「${nm.name}」却自己出现了。` : `噩梦：世界梦到了「${nm.name}」的反面。${pick(DREAMS)}`, 'dream');
     } else if (world.erosion > 0.45 && rng() < (world.erosion - 0.45) * 0.4) chron(pick(DREAMS), 'dream');
+    if (world.wishJustDone) {
+      chron(`大地发出一声悠长的叹息。${world.wish.reveal}它得到了。梦蚀消散，世界前所未有地清醒。`, 'wish');
+    } else if (world.inWish && st.wishSeen !== st.era && !world.wishDone) {
+      st.wishSeen = st.era; chron('不知为何，大地似乎很满足。', 'wish');
+    }
     drawMap(o); drawObs(o); drawHeader();
     if (o.pop < 0.02) return end(true);
     if (++t < ERA_YEARS) return setTimeout(tick, 70);
@@ -285,11 +329,12 @@ $('btnRun').onclick = () => {
     if (world.erosion > 0.6) st.dreamEras++;
     const an = Sim.anticipate(world);
     for (const p of an.preps) {
-      const om = OMENS.find((x) => x.id === p.id);
-      chron(`学者们推算「${om.name}」即将再临。${PREPS[p.id]}`, 'myth');
+      chron(`学者们推算「${Sim.omenName(p.id)}」即将再临。${PREPS[p.id] || '人们按照记载中的样子做了准备。'}`, 'myth');
     }
     if (st.era > ERAS) return end(false);
-    chron(`—— 第 ${st.era} 纪元开始 ——`, 'era'); render();
+    chron(`—— 第 ${st.era} 纪元开始 ——`, 'era');
+    if (!world.wishDone && rng() < 0.6) chron(Sim.wishHint(world, st.era, rng), 'wish');
+    render();
   };
   tick();
 };
@@ -299,12 +344,16 @@ function end(extinct) {
   if (extinct && world.erosion > 0.6) st.dreamEras++;
   const predict = st.acts ? st.hedgeSum / st.acts : 0;
   const title = extinct ? '寂静之地' : st.dreamEras >= 3 && avg > 0.15 ? '梦外之主' : avg > 0.33 ? '黄金时代的园丁' : avg > 0.22 ? '温和的守望者' : avg > 0.14 ? '旁观者' : '迟到的神';
-  const cults = Object.entries(st.uses).filter(([, n]) => n >= 3).map(([id]) => '「' + OMENS.find((o) => o.id === id).name + '」');
-  $('endBody').innerHTML = `<h2 style="font-size:18px;color:var(--acc)">${title}</h2>
+  const cults = Object.entries(st.uses).filter(([, n]) => n >= 3).map(([id]) => '「' + Sim.omenName(id) + '」');
+  const wishLine = world.wishDone ? `${world.wish.reveal}你听见了，并且回应了它。`
+    : `${world.wish.reveal}${world.wishBest ? `最接近的时候，它连续满足了 ${world.wishBest} 年。` : '你从未让它满足过。'}`;
+  const fullTitle = world.wishDone && !extinct ? `${title} · ${world.wish.name}之愿` : title;
+  $('endBody').innerHTML = `<h2 style="font-size:18px;color:var(--acc)">${fullTitle}</h2>
     <p>${extinct ? `第 ${world.year} 年，最后一个人离开了这片土地。` : `${ERAS * ERA_YEARS} 年过去了。`}</p>
-    <p>平均繁荣度 <b>${avg.toFixed(3)}</b>（参考：完全不干预约 0.17；能预见未来的贪心规划约 0.30）</p>
+    <p>平均繁荣度 <b>${avg.toFixed(3)}</b>（参考：完全不干预约 0.19；能预见未来的贪心规划约 0.27，加上合成约 0.33）</p>
     <p>你一共降下 ${st.acts} 次征兆，平均被预料并削弱 ${Math.round(predict * 100)}%。${predict > 0.35 ? '他们早已摸清了你的脾气。' : predict < 0.1 ? '对他们来说，你始终是个谜。' : ''}</p>
     <p>${st.dreamEras ? `有 ${st.dreamEras} 个纪元，世界是在梦中度过的。` : '世界始终保持清醒。'}</p>
+    <p style="color:#f2a65a">${wishLine}</p>
     <p>${cults.length ? `他们记得你。在他们的经书里，你被称为 ${cults.join('、')} 的主人。` : '他们从未意识到你的存在。'}</p>
     <p class="note">种子 ${SEED}。在网址后加 ?seed=${SEED} 可以重玩同一个世界。</p>
     <button onclick="location.search='?seed='+${SEED}">重玩此世界</button> <button onclick="location.search=''">新的世界</button>`;
