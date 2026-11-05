@@ -85,6 +85,7 @@
       const e = OBS.map((ob) => o.effect[ob.key] || 0);
       omenVecs[o.id] = matVec(Winv, e); // 潜空间中的方向
     }
+    const panicVec = matVec(Winv, OBS.map((ob) => ({ strife: 1, faith: 0.6, pop: -0.2 })[ob.key] || 0));
     const start = [0.55, 0.55, 0.3, 0.35, 0.2, 0.15];
     const z = matVec(Winv, start.map(logit));
     // 地形：静态的"可视化解码"种子
@@ -100,14 +101,38 @@
       const dx = nx - 0.5, dy = ny - 0.5;
       height.push(h * 0.5 + 0.6 - 1.6 * (dx * dx + dy * dy) + 0.15 * (rng() - 0.5));
     }
+    // 梦蚀用的扭曲矩阵：两组固定随机矩阵，随年份缓慢旋转
+    const warpA = [], warpB = [];
+    for (let a = 0; a < D; a++) {
+      warpA.push([]); warpB.push([]);
+      for (let b = 0; b < D; b++) { warpA[a].push(gauss(rng)); warpB[a].push(gauss(rng)); }
+    }
     return {
-      seed, rngState: seed ^ 0x9e3779b9, Wd, Winv, omenVecs, z,
-      year: 0, map: { W, H, height }, history: [], alive: true,
+      seed, Wd, Winv, panicVec, warpA, warpB, omenVecs, z,
+      year: 0, map: { W, H, height },
+      erosion: 0,                 // 梦蚀：离开"训练流形"的程度 ∈ [0,1]
+        expect: Object.fromEntries(OMENS.map((o) => [o.id, 0])), // 居民对每个征兆的预期 ∈ [0,1]
+      eraUses: Object.fromEntries(OMENS.map((o) => [o.id, 0])), // 本纪元使用次数
+      totalUses: Object.fromEntries(OMENS.map((o) => [o.id, 0])),
     };
   }
 
+  function cloneWorld(w) {
+    return { ...w, z: w.z.slice(), expect: { ...w.expect }, eraUses: { ...w.eraUses }, totalUses: { ...w.totalUses } };
+  }
+
+  // ---------- 梦蚀 ----------
+  // 世界模型在分布外会"做梦"：解码器发生漂移（指标失去原有含义），
+  // 而动力学仍按原来的逆映射推进——于是规则本身开始失灵。
+  function warpedDecoder(world) {
+    const e = world.erosion;
+    if (e < 1e-3) return world.Wd;
+    const t = world.year / 30, ca = Math.cos(t) * 0.55 * e, sb = Math.sin(t) * 0.55 * e;
+    return world.Wd.map((row, a) => row.map((v, b) => v + ca * world.warpA[a][b] + sb * world.warpB[a][b]));
+  }
+
   function decode(world, z = world.z) {
-    const l = matVec(world.Wd, z);
+    const l = matVec(warpedDecoder(world), z);
     const o = {};
     OBS.forEach((ob, i) => (o[ob.key] = sigmoid(l[i])));
     return o;
@@ -127,19 +152,76 @@
     };
   }
 
+  const EROSION_DECAY = 0.985; // 每年；半衰期约 46 年 ≈ 2 个纪元
+
   function step(world, rng, noise = 1) {
     const o = decode(world);
     const g = drift(o);
     const dt = 0.22;
     const gl = OBS.map((ob) => g[ob.key] * dt);
     const dz = matVec(world.Winv, gl);
-    for (let i = 0; i < D; i++) world.z[i] += dz[i] + noise * 0.09 * gauss(rng);
+    const sigma = noise * 0.09 * (1 + 2.5 * world.erosion); // 梦蚀让未来更不确定
+    for (let i = 0; i < D; i++) world.z[i] += dz[i] + sigma * gauss(rng);
+    world.nightmare = null;
+    // 噩梦：梦蚀超过 0.35 后，世界会随机地"梦到"某个征兆（方向随机），并伴随恐慌
+    const pN = Math.max(0, world.erosion - 0.35) * 0.8;
+    if (rng() < pN) {
+      const om = OMENS[Math.floor(rng() * OMENS.length)];
+      const sign = rng() < 0.5 ? -1 : 1, k = 1.1 * world.erosion;
+      const v = world.omenVecs[om.id];
+      for (let i = 0; i < D; i++) world.z[i] += sign * k * v[i] + 0.35 * k * world.panicVec[i];
+      world.nightmare = { id: om.id, sign };
+    }
+    world.erosion *= EROSION_DECAY;
     world.year += 1;
   }
 
+  // ---------- 居民对你的预测 ----------
+  // 学者的预测能力取决于技艺（文字、记录、观测），信仰过高时会被教义取代。
+  function scholarAbility(o) {
+    return Math.min(1, Math.max(0, 0.15 + 0.85 * o.craft - 0.35 * o.faith));
+  }
+
+  // 干预：返回本次干预的详细结果，供 UI 叙述
+  //  - 梦蚀放大：已经离开流形的世界更"软"，同样的推动效果更大，但也更不可预测
+  //  - 对冲：居民预期到的征兆，效果被削弱（他们早已做好准备）
+  //  - 震惊：完全出乎预料的征兆会引发恐慌（纷争、信仰上升）
   function intervene(world, omenId, strength) {
+    const o = decode(world);
+    const ability = scholarAbility(o);
+    const amp = 1 + 0.8 * world.erosion;
+    const hedge = Math.min(0.85, world.expect[omenId] * (0.35 + 0.65 * ability));
+    const eff = strength * amp * (1 - hedge);
     const v = world.omenVecs[omenId];
-    for (let i = 0; i < D; i++) world.z[i] += strength * v[i];
+    for (let i = 0; i < D; i++) world.z[i] += eff * v[i];
+    const surprise = 1 - world.expect[omenId];
+    const shock = 0.45 * surprise * surprise * strength * (0.3 + o.faith);
+    if (shock > 0.01) for (let i = 0; i < D; i++) world.z[i] += shock * world.panicVec[i];
+    const dE = 0.05 * strength * strength * amp;
+    world.erosion = Math.min(1, world.erosion + dE);
+    world.eraUses[omenId]++; world.totalUses[omenId]++;
+    return { amp, hedge, eff, shock, erosionGain: dE, ability };
+  }
+
+  // 纪元结束：学者根据你过去的行为更新预期，并为"预期中的征兆"提前做准备。
+  // 准备是一种反向推动——即使你这次没有降下它，准备也已经发生（可能白费）。
+  function anticipate(world) {
+    const o = decode(world);
+    const ability = scholarAbility(o);
+    const preps = [];
+    for (const om of OMENS) {
+      const used = Math.min(1, world.eraUses[om.id] / 2);
+      const cult = world.totalUses[om.id] >= 5 ? 0.15 : 0; // 崇拜它的教派会额外努力预测
+      world.expect[om.id] = Math.min(1, 0.55 * world.expect[om.id] + (0.5 + cult) * used * (0.4 + 0.6 * ability));
+      world.eraUses[om.id] = 0;
+      const prep = world.expect[om.id] * ability;
+      if (prep > 0.25) {
+        const k = 0.22 * prep, v = world.omenVecs[om.id];
+        for (let i = 0; i < D; i++) world.z[i] -= k * v[i];
+        preps.push({ id: om.id, level: prep });
+      }
+    }
+    return { ability, preps };
   }
 
   // 繁荣度：既要人口，也要和平，也不能把一切押在单一维度上
@@ -155,7 +237,7 @@
     const rng = mulberry32(seed);
     const runs = [];
     for (let k = 0; k < samples; k++) {
-      const w = { ...world, z: world.z.slice() };
+      const w = cloneWorld(world);
       if (omen) intervene(w, omen, strength);
       const traj = [decode(w)];
       for (let t = 0; t < years; t++) { step(w, rng); traj.push(decode(w)); }
@@ -164,6 +246,7 @@
     return runs;
   }
 
-  root.Sim = { OBS, OMENS, createWorld, decode, step, intervene, flourishing, prophecy, mulberry32, gauss };
+  root.Sim = { OBS, OMENS, createWorld, cloneWorld, decode, step, intervene, anticipate, scholarAbility,
+    flourishing, prophecy, mulberry32, gauss };
   if (typeof module !== 'undefined') module.exports = root.Sim;
 })(typeof window !== 'undefined' ? window : globalThis);
