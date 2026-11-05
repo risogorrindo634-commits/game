@@ -289,6 +289,21 @@
     return { key, compound, reverse: isReverse(key), amp, hedge, eff, shock, erosionGain: dE, ability };
   }
 
+  // ---------- 居民的集体行动（来自 LLM 居民层） ----------
+  // LLM 只能选择"哪个指标、往哪个方向"，幅度由这里固定并限幅——叙事可以影响世界，但不能接管世界。
+  const RESIDENT_NUDGE = 0.25, RESIDENT_MAX_NUDGES = 2;
+  function residentNudge(world, nudges) {
+    const applied = [];
+    for (const n of (nudges || []).slice(0, RESIDENT_MAX_NUDGES)) {
+      const k = OBS.findIndex((ob) => ob.key === n.indicator);
+      if (k < 0 || (n.direction !== 'up' && n.direction !== 'down')) continue;
+      const d = n.direction === 'up' ? RESIDENT_NUDGE : -RESIDENT_NUDGE;
+      for (let i = 0; i < D; i++) world.z[i] += world.Winv[i][k] * d;
+      applied.push({ indicator: n.indicator, direction: n.direction });
+    }
+    return applied;
+  }
+
   function anchor(world, key) {
     world.anchor = { key, value: Math.min(0.97, Math.max(0.03, decode(world)[key])), years: ANCHOR_YEARS };
     return world.anchor;
@@ -346,7 +361,7 @@
     return runs;
   }
 
-  root.Sim = { OBS, OMENS, WISHES, WISH_YEARS, COMPOUND_NAMES, REVERSE_NAMES, REVERSE_UNLOCK, ANCHOR_YEARS, isReverse, anchor, compoundKey, omenName, wishHint, createWorld, cloneWorld, decode, step, intervene, anticipate, scholarAbility,
+  root.Sim = { OBS, OMENS, WISHES, WISH_YEARS, COMPOUND_NAMES, REVERSE_NAMES, REVERSE_UNLOCK, ANCHOR_YEARS, isReverse, anchor, residentNudge, compoundKey, omenName, wishHint, createWorld, cloneWorld, decode, step, intervene, anticipate, scholarAbility,
     flourishing, prophecy, mulberry32, gauss };
   if (typeof module !== 'undefined') module.exports = root.Sim;
 })(typeof window !== 'undefined' ? window : globalThis);
